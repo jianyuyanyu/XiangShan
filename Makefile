@@ -18,6 +18,9 @@
 BUILD_DIR = ./build
 RTL_DIR = $(BUILD_DIR)/rtl
 
+# import docker support
+include scripts/Makefile.docker
+
 # if XSTopPrefix is specified in yaml, use it.
 ifneq ($(YAML_CONFIG),)
 HAS_PREFIX_FROM_YAML = $(shell grep 'XSTopPrefix *:' $(YAML_CONFIG))
@@ -36,6 +39,7 @@ SIMTOP  = top.SimTop
 RTL_SUFFIX ?= sv
 TOP_V = $(RTL_DIR)/$(TOP).$(RTL_SUFFIX)
 SIM_TOP_V = $(RTL_DIR)/$(SIM_TOP).$(RTL_SUFFIX)
+JAR = $(BUILD_DIR)/xsgen.jar
 
 SCALA_FILE = $(shell find ./src/main/scala -name '*.scala')
 TEST_FILE = $(shell find ./src/test/scala -name '*.scala')
@@ -212,8 +216,12 @@ version:
 jar:
 	mill -i xiangshan.assembly
 
-test-jar:
-	mill -i xiangshan.test.assembly
+$(JAR):
+	@mkdir -p $(@D); \
+	JAR_REF=$(shell mill -i show xiangshan.test.assembly); \
+	[ ! -z $${JAR_REF} ] && echo $${JAR_REF} | sed 's/"//g' | awk -F: '{print $$4}' \
+		| xargs -I{} cp {} $@
+test-jar: $(call docker-deps,$(JAR))
 
 comp:
 	mill -i xiangshan.compile
@@ -226,16 +234,11 @@ $(TOP_V): $(SCALA_FILE)
 		--num-cores $(NUM_CORES) $(TOPMAIN_ARGS)
 ifeq ($(CHISEL_TARGET),systemverilog)
 	$(MEM_GEN_SEP) "$(MEM_GEN)" "$@.conf" "$(@D)"
-	@git log -n 1 >> .__head__
-	@git diff >> .__diff__
-	@sed -i 's/^/\/\// ' .__head__
-	@sed -i 's/^/\/\//' .__diff__
-	@cat .__head__ .__diff__ $@ > .__out__
-	@mv .__out__ $@
-	@rm .__head__ .__diff__
+	@{ git log -n 1; git diff; } | sed 's/^/\/\// ' > $(dir $@).__diff__
+	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 endif
 
-verilog: $(TOP_V)
+verilog: $(call docker-deps,$(TOP_V))
 
 $(SIM_TOP_V): $(SCALA_FILE) $(TEST_FILE)
 	mkdir -p $(@D)
@@ -246,13 +249,8 @@ $(SIM_TOP_V): $(SCALA_FILE) $(TEST_FILE)
 		--num-cores $(NUM_CORES) $(SIM_ARGS) --full-stacktrace
 ifeq ($(CHISEL_TARGET),systemverilog)
 	$(MEM_GEN_SEP) "$(MEM_GEN)" "$@.conf" "$(@D)"
-	@git log -n 1 >> .__head__
-	@git diff >> .__diff__
-	@sed -i 's/^/\/\// ' .__head__
-	@sed -i 's/^/\/\//' .__diff__
-	@cat .__head__ .__diff__ $@ > .__out__
-	@mv .__out__ $@
-	@rm .__head__ .__diff__
+	@{ git log -n 1; git diff; } | sed 's/^/\/\// ' > $(dir $@).__diff__
+	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 ifeq ($(PLDM),1)
 	sed -i -e 's/$$fatal/$$finish/g' $(RTL_DIR)/*.$(RTL_SUFFIX)
 	sed -i -e '/sed/! { \|$(SED_IFNDEF)|, \|$(SED_ENDIF)| { \|$(SED_IFNDEF)|d; \|$(SED_ENDIF)|d; } }' $(RTL_DIR)/*.$(RTL_SUFFIX)
@@ -266,7 +264,7 @@ endif
 	sed -i -e "s/\$$error(/\$$fwrite(32\'h80000002, /g" $(RTL_DIR)/*.$(RTL_SUFFIX)
 endif
 
-sim-verilog: $(SIM_TOP_V)
+sim-verilog: $(call docker-deps,$(SIM_TOP_V))
 
 clean:
 	$(MAKE) -C ./difftest clean
@@ -279,6 +277,10 @@ init:
 
 bump:
 	git submodule foreach "git fetch origin&&git checkout master&&git reset --hard origin/master"
+
+deps:
+	mill -i __.prepareOffline
+	mill -i xiangshan.resolveFirtoolDeps
 
 bsp:
 	mill -i mill.bsp.BSP/install
@@ -293,7 +295,10 @@ reformat:
 	mill xiangshan.reformat
 
 # verilator simulation
-emu: sim-verilog
+emu-mk: sim-verilog
+	$(MAKE) -C ./difftest emu-mk SIM_TOP=SimTop DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
+
+emu: $(call docker-deps,emu-mk)
 	$(MAKE) -C ./difftest emu SIM_TOP=SimTop DESIGN_DIR=$(NOOP_HOME) NUM_CORES=$(NUM_CORES) RTL_SUFFIX=$(RTL_SUFFIX)
 
 emu-run: emu

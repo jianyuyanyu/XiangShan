@@ -541,6 +541,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       mmio(stWbIndexReg) := io.storeAddrInRe(i).mmio
       memBackTypeMM(stWbIndexReg) := io.storeAddrInRe(i).memBackTypeMM
       hasException(stWbIndexReg) := io.storeAddrInRe(i).hasException
+      addrvalid(stWbIndexReg) := addrvalid(stWbIndexReg) || io.storeAddrInRe(i).hasException
       waitStoreS2(stWbIndexReg) := false.B
     }
     // dcache miss info (one cycle later than storeIn)
@@ -938,7 +939,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
   // RegNext(io.sbuffer(i).fire) is used to alignment timing
   val isCboZeroToSbVec = (0 until EnsbufferWidth).map{ i =>
-    RegNext(io.sbuffer(i).fire) && uop(deqPtrExt(i).value).fuOpType === LSUOpType.cbo_zero && allocated(deqPtrExt(i).value)
+    RegNext(io.sbuffer(i).fire && io.sbuffer(i).bits.vecValid) && uop(deqPtrExt(i).value).fuOpType === LSUOpType.cbo_zero && allocated(deqPtrExt(i).value)
   }
   val cboZeroToSb        = isCboZeroToSbVec.reduce(_ || _)
   val cboZeroFlushSb     = GatedRegNext(cboZeroToSb)
@@ -1417,7 +1418,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // misprediction recovery / exception redirect
   // invalidate sq term using robIdx
   for (i <- 0 until StoreQueueSize) {
-    needCancel(i) := uop(i).robIdx.needFlush(io.brqRedirect) && allocated(i) && !committed(i)
+    needCancel(i) := (uop(i).robIdx.needFlush(io.brqRedirect) & !isVec(i) || isAfter(uop(i).robIdx, io.brqRedirect.bits.robIdx) && io.brqRedirect.valid && isVec(i)) && allocated(i) && !committed(i)
     when (needCancel(i)) {
       allocated(i) := false.B
       completed(i) := false.B
