@@ -345,12 +345,12 @@ class ResetPregStateReq(implicit p: Parameters) extends XSBundle {
 
 class DebugBundle(implicit p: Parameters) extends XSBundle {
   val isMMIO = Bool()
-  val isNC = Bool()
+  val isNCIO = Bool()
   val isPerfCnt = Bool()
   val paddr = UInt(PAddrBits.W)
   val vaddr = UInt(VAddrBits.W)
 
-  def isSkipDiff: Bool = isMMIO || isNC || isPerfCnt
+  def isSkipDiff: Bool = isMMIO || isNCIO || isPerfCnt
   /* add L/S inst info in EXU */
   // val L1toL2TlbLatency = UInt(XLEN.W)
   // val levelTlbHit = UInt(2.W)
@@ -464,6 +464,11 @@ class LoadCancelIO(implicit p: Parameters) extends XSBundle {
   val ld2Cancel = Bool()
 }
 
+class WfiReqBundle extends Bundle {
+  val wfiReq = Output(Bool())
+  val wfiSafe = Input(Bool())
+}
+
 class FrontendToCtrlIO(implicit p: Parameters) extends XSBundle {
   // to backend end
   val cfVec = Vec(DecodeWidth, DecoupledIO(new CtrlFlow))
@@ -473,6 +478,8 @@ class FrontendToCtrlIO(implicit p: Parameters) extends XSBundle {
   // from backend
   val toFtq = Flipped(new CtrlToFtqIO)
   val canAccept = Input(Bool())
+
+  val wfi = Flipped(new WfiReqBundle)
 }
 
 class SatpStruct(implicit p: Parameters) extends XSBundle {

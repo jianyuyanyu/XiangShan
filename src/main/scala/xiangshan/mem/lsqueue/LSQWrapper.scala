@@ -128,10 +128,12 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val force_write = Output(Bool())
     val lqEmpty = Output(Bool())
     val rarValidCount = Output(UInt())
-
+    val wfi = Flipped(new WfiReqBundle)
     // top-down
     val debugTopDown = new LoadQueueTopDownIO
     val noUopsIssued = Input(Bool())
+
+    val generateFromSBuffer = Input(new GenerateInfoFromSBuffer)
   })
 
   val loadQueue = Module(new LoadQueue)
@@ -139,6 +141,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
   storeQueue.io.hartId := io.hartId
   storeQueue.io.uncacheOutstanding := io.uncacheOutstanding
+  storeQueue.io.wfi <> io.wfi
 
   if (backendParams.debugEn){ dontTouch(loadQueue.io.tlbReplayDelayCycleCtrl) }
 
@@ -196,6 +199,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   storeQueue.io.cmoOpResp    <> io.cmoOpResp
   storeQueue.io.flushSbuffer <> io.flushSbuffer
   storeQueue.io.maControl    <> io.maControl
+  storeQueue.io.generateFromSBuffer := io.generateFromSBuffer
 
   /* <------- DANGEROUS: Don't change sequence here ! -------> */
 
@@ -251,7 +255,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   val s_idle :: s_load :: s_store :: Nil = Enum(3)
   val pendingstate = RegInit(s_idle)
   val selectLq = (loadQueue.io.uncache.req.valid && !storeQueue.io.uncache.req.valid) || (
-    loadQueue.io.uncache.req.valid && storeQueue.io.uncache.req.valid && 
+    loadQueue.io.uncache.req.valid && storeQueue.io.uncache.req.valid &&
     loadQueue.io.uncache.req.bits.robIdx < storeQueue.io.uncache.req.bits.robIdx
   )
 

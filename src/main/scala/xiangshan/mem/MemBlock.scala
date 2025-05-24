@@ -312,7 +312,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     val ifetchPrefetch = Vec(LduCnt, ValidIO(new SoftIfetchPrefetchBundle))
 
     // misc
-    val error = ValidIO(new L1CacheErrorInfo)
+    val dcacheError = ValidIO(new L1CacheErrorInfo)
+    val uncacheError = Output(new L1BusErrorUnitInfo())
     val memInfo = new Bundle {
       val sqFull = Output(Bool())
       val lqFull = Output(Bool())
@@ -361,6 +362,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       val toL2Top     = new TraceCoreInterface
     }
 
+    val wfi = Flipped(new WfiReqBundle)
+
     val topDownInfo = new Bundle {
       val fromL2Top = Input(new TopDownFromL2Top)
       val toBackend = Flipped(new TopDownInfo)
@@ -398,10 +401,12 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
   val csrCtrl = DelayN(io.ooo_to_mem.csrCtrl, 2)
   dcache.io.l2_pf_store_only := RegNext(io.ooo_to_mem.csrCtrl.pf_ctrl.l2_pf_store_only, false.B)
-  io.error <> DelayNWithValid(dcache.io.error, 2)
+  io.dcacheError <> DelayNWithValid(dcache.io.error, 2)
+  io.uncacheError.ecc_error <> DelayNWithValid(uncache.io.busError.ecc_error, 2)
   when(!csrCtrl.cache_error_enable){
-    io.error.bits.report_to_beu := false.B
-    io.error.valid := false.B
+    io.dcacheError.bits.report_to_beu := false.B
+    io.dcacheError.valid := false.B
+    io.uncacheError.ecc_error.valid := false.B
   }
 
   val loadUnits = Seq.fill(LduCnt)(Module(new LoadUnit))
@@ -612,6 +617,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   atomicsUnit.io.hartId := io.hartId
 
   dcache.io.lqEmpty := lsq.io.lqEmpty
+  dcache.io.wfi.wfiReq := io.wfi.wfiReq
+  lsq.io.wfi.wfiReq := io.wfi.wfiReq
 
   // load/store prefetch to l2 cache
   prefetcherOpt.foreach(sms_pf => {
@@ -658,6 +665,9 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   ptw.io.sfence <> sfence
   ptw.io.csr.tlb <> tlbcsr
   ptw.io.csr.distribute_csr <> csrCtrl.distribute_csr
+  ptw.io.wfi.wfiReq := io.wfi.wfiReq
+
+  io.wfi.wfiSafe := dcache.io.wfi.wfiSafe && uncache.io.wfi.wfiSafe && lsq.io.wfi.wfiSafe && ptw.io.wfi.wfiSafe
 
   val perfEventsPTW = if (!coreParams.softPTW) {
     ptw.getPerfEvents
@@ -728,7 +738,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
   for (i <- 0 until LdExuCnt) {
     tlbreplay(i) := dtlb_ld(0).ptw.req(i).valid && ptw_resp_next.vector(0) && ptw_resp_v &&
-      ptw_resp_next.data.hit(dtlb_ld(0).ptw.req(i).bits.vpn, tlbcsr.satp.asid, tlbcsr.vsatp.asid, tlbcsr.hgatp.vmid, allType = true, ignoreAsid = true)
+      ptw_resp_next.data.hit(dtlb_ld(0).ptw.req(i).bits.vpn, tlbcsr.satp.asid, tlbcsr.vsatp.asid, tlbcsr.hgatp.vmid,
+        allType = true, ignoreAsid = true) // Maybe need not ignoreAsid here, however not a functional bug
   }
 
   dtlb.flatMap(a => a.ptw.req)
@@ -740,7 +751,10 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       else if (i < TlbEndVec(dtlb_ld_idx)) Cat(ptw_resp_next.vector.slice(TlbStartVec(dtlb_ld_idx), TlbEndVec(dtlb_ld_idx))).orR
       else if (i < TlbEndVec(dtlb_st_idx)) Cat(ptw_resp_next.vector.slice(TlbStartVec(dtlb_st_idx), TlbEndVec(dtlb_st_idx))).orR
       else                                 Cat(ptw_resp_next.vector.slice(TlbStartVec(dtlb_pf_idx), TlbEndVec(dtlb_pf_idx))).orR
-    ptwio.req(i).valid := tlb.valid && !(ptw_resp_v && vector_hit && ptw_resp_next.data.hit(tlb.bits.vpn, tlbcsr.satp.asid, tlbcsr.vsatp.asid, tlbcsr.hgatp.vmid, allType = true, ignoreAsid = true))
+    ptwio.req(i).valid := tlb.valid &&
+      !(ptw_resp_v && vector_hit &&
+        ptw_resp_next.data.hit(tlb.bits.vpn, tlbcsr.satp.asid, tlbcsr.vsatp.asid, tlbcsr.hgatp.vmid,
+          allType = true, ignoreAsid = true)) // // Maybe need not ignoreAsid here, however not a functional bug
   }
   dtlb.foreach(_.ptw.resp.bits := ptw_resp_next.data)
   if (refillBothTlb) {
@@ -1371,6 +1385,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   // Uncache
   uncache.io.enableOutstanding := io.ooo_to_mem.csrCtrl.uncache_write_outstanding_enable
   uncache.io.hartId := io.hartId
+  uncache.io.wfi.wfiReq := io.wfi.wfiReq
   lsq.io.uncacheOutstanding := io.ooo_to_mem.csrCtrl.uncache_write_outstanding_enable
 
   // Lsq
@@ -1488,6 +1503,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
   // LSQ to store buffer
   lsq.io.sbuffer        <> sbuffer.io.in
+  lsq.io.generateFromSBuffer <> sbuffer.io.generateToSQ
   sbuffer.io.in(0).valid := lsq.io.sbuffer(0).valid || vSegmentUnit.io.sbuffer.valid
   sbuffer.io.in(0).bits  := Mux1H(Seq(
     vSegmentUnit.io.sbuffer.valid -> vSegmentUnit.io.sbuffer.bits,
@@ -2057,7 +2073,6 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       traceFromBackend.toEncoder.groups(i).valid
     ) << instOffsetBits)
   }
-
 
   io.mem_to_ooo.storeDebugInfo := DontCare
   // store event difftest information

@@ -41,25 +41,9 @@ import freechips.rocketchip.util.AsyncResetSynchronizerShiftReg
 import difftest.common.DifftestWiring
 import difftest.util.Profile
 
-class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
+class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc
 {
   override lazy val desiredName: String = "XSTop"
-
-  ResourceBinding {
-    val width = ResourceInt(2)
-    val model = "freechips,rocketchip-unknown"
-    Resource(ResourceAnchors.root, "model").bind(ResourceString(model))
-    Resource(ResourceAnchors.root, "compat").bind(ResourceString(model + "-dev"))
-    Resource(ResourceAnchors.soc, "compat").bind(ResourceString(model + "-soc"))
-    Resource(ResourceAnchors.root, "width").bind(width)
-    Resource(ResourceAnchors.soc, "width").bind(width)
-    Resource(ResourceAnchors.cpus, "width").bind(ResourceInt(1))
-    def bindManagers(xbar: TLNexusNode) = {
-      ManagerUnification(xbar.edges.in.head.manager.managers).foreach{ manager =>
-        manager.resources.foreach(r => r.bind(manager.toResource))
-      }
-    }
-  }
 
   require(enableCHI)
 
@@ -127,17 +111,15 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
   val core_rst_node = BundleBridgeSource(() => Reset())
   core_with_l2.tile.core_reset_sink := core_rst_node
 
-  class XSNoCTopImp(wrapper: XSNoCTop) extends LazyRawModuleImp(wrapper) {
+  class XSNoCTopImp(wrapper: XSNoCTop) extends LazyRawModuleImp(wrapper)
+    with HasDTSImp[XSNoCTop]
+  {
     soc.XSTopPrefix.foreach { prefix =>
       val mod = this.toNamed
       annotate(new ChiselAnnotation {
         def toFirrtl = NestedPrefixModulesAnnotation(mod, prefix, true)
       })
     }
-    FileRegisters.add("dts", dts)
-    FileRegisters.add("graphml", graphML)
-    FileRegisters.add("json", json)
-    FileRegisters.add("plusArgs", freechips.rocketchip.util.PlusArgArtefacts.serialize_cHeader())
 
     val clock = IO(Input(Clock()))
     val reset = IO(Input(AsyncReset()))
@@ -205,7 +187,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
     dontTouch(io)
 
     /*
-     SoC control the sequence of power on/off with isolation/reset/clock
+     SoC Control the sequence of power on/off with isolation/reset/clock
      */
     val soc_rst_n = io.lp.map(_.i_cpu_sw_rst_n).getOrElse(true.B)
     val soc_iso_en = io.lp.map(_.i_cpu_iso_en).getOrElse(false.B)
@@ -273,7 +255,7 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
 
     /* during power down sequence, SoC reset will gate clock */
     val pwrdownGateClock = withClockAndReset(clock, cpuReset_sync.asAsyncReset) {RegInit(false.B)}
-    pwrdownGateClock := !soc_rst_n && lpState === sPOFFREQ
+    pwrdownGateClock := cpuReset && lpState === sPOFFREQ
     /*
      physical power off handshake:
      i_cpu_pwrdown_req_n
@@ -360,50 +342,26 @@ class XSNoCTop()(implicit p: Parameters) extends BaseXSSoc with HasSoCParameter
   lazy val module = new XSNoCTopImp(this)
 }
 
-class XSNoCDiffTop(implicit p: Parameters) extends Module {
-  override val desiredName: String = "XSDiffTop"
-  val l_soc = LazyModule(new XSNoCTop())
-  val soc = Module(l_soc.module)
+class XSNoCDiffTop(implicit p: Parameters) extends XSNoCTop
+{
+  class XSNoCDiffTopImp(wrapper: XSNoCTop) extends XSNoCTopImp(wrapper) {
+    // TODO:
+    // XSDiffTop is only part of DUT, we can not instantiate difftest here.
+    // Temporarily we collect Performance counters for each DiffTop, need control signals passed from Difftest
+    val timer = IO(Input(UInt(64.W)))
+    val logEnable = IO(Input(Bool()))
+    val clean = IO(Input(Bool()))
+    val dump = IO(Input(Bool()))
 
-  // Expose XSTop IOs outside, i.e. io
-  def exposeIO(data: Data, name: String): Unit = {
-    val dummy = IO(chiselTypeOf(data)).suggestName(name)
-    dummy <> data
-  }
-  def exposeOptionIO(data: Option[Data], name: String): Unit = {
-    if (data.isDefined) {
-      val dummy = IO(chiselTypeOf(data.get)).suggestName(name)
-      dummy <> data.get
+    withClockAndReset(clock, cpuReset_sync) {
+      XSLog.collect(timer, logEnable, clean, dump)
     }
+    DifftestWiring.createAndConnectExtraIOs()
+    Profile.generateJson("XiangShan")
+    XSNoCDiffTopChecker()
   }
-  exposeIO(l_soc.clint, "clint")
-  exposeIO(l_soc.debug, "debug")
-  exposeIO(l_soc.plic, "plic")
-  exposeIO(l_soc.beu, "beu")
-  exposeIO(l_soc.nmi, "nmi")
-  soc.clock := clock
-  soc.reset := reset.asAsyncReset
-  exposeIO(soc.soc_clock, "soc_clock")
-  exposeIO(soc.soc_reset, "soc_reset")
-  exposeIO(soc.io, "io")
-  exposeOptionIO(soc.noc_clock, "noc_clock")
-  exposeOptionIO(soc.noc_reset, "noc_reset")
-  exposeOptionIO(soc.imsic_axi4, "imsic_axi4")
-  exposeOptionIO(soc.imsic_m_tl, "imsic_m_tl")
-  exposeOptionIO(soc.imsic_s_tl, "imsic_s_tl")
-  exposeOptionIO(soc.imsic, "imsic")
 
-  // TODO:
-  // XSDiffTop is only part of DUT, we can not instantiate difftest here.
-  // Temporarily we collect Performance counters for each DiffTop, need control signals passed from Difftest
-  val timer = IO(Input(UInt(64.W)))
-  val logEnable = IO(Input(Bool()))
-  val clean = IO(Input(Bool()))
-  val dump = IO(Input(Bool()))
-  XSLog.collect(timer, logEnable, clean, dump)
-  DifftestWiring.createAndConnectExtraIOs()
-  Profile.generateJson("XiangShan")
-  XSNoCDiffTopChecker()
+  override lazy val module = new XSNoCDiffTopImp(this)
 }
 
 // TODO:
@@ -438,7 +396,7 @@ object XSNoCDiffTopChecker {
         |    for (i = 0; i < `CONFIG_XSCORE_NR; i = i+1)
         |    begin: u_CPU_TOP
         |    // FIXME: add missing ports
-        |    XSDiffTop u_XSTop (
+        |    XSTop u_XSTop (
         |        .clock                   (cpu_clk),
         |        .noc_clock               (sys_clk),
         |        .soc_clock               (sys_clk),
